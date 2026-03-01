@@ -61,12 +61,59 @@ string SellBuy        = "SellBuy";
 int    iStart         = 50 ;
 
 int count1,count2,count3,count4,count5=0;
+int CalcDigits = 3;
+
+bool ValidateConfig()
+{
+   if(Resiver_Port==0){
+      Print("Invalid Resiver_Port");
+      return false;
+   }
+   if(Lots<=0){
+      Print("Invalid Lots, must be > 0");
+      return false;
+   }
+   if(TP<=0 || SL<=0){
+      Print("Invalid TP/SL, must be > 0");
+      return false;
+   }
+   if(Digits_Symbol<0 || Digits_Symbol>8){
+      Print("Invalid Digits_Symbol, using symbol digits");
+      CalcDigits = Digits;
+   } else {
+      CalcDigits = Digits_Symbol;
+   }
+   return true;
+}
+
+bool TryParseFeedMessage(string msg,double &parsedAsk,double &parsedBid,string &feedId)
+{
+   int p2 = StringFind(msg,"#*2");
+   int p3 = StringFind(msg,"#*3");
+   int p4 = StringFind(msg,"#*4");
+   if(p2<=2 || p3<=p2 || p4<=p3){
+      return false;
+   }
+
+   feedId = StringSubstr(msg,3,p2-3);
+   parsedAsk = Price_Double(StringSubstr(msg,p2+3,p3-(p2+3)));
+   parsedBid = Price_Double(StringSubstr(msg,p3+3,p4-(p3+3)));
+
+   if(parsedAsk<=0 || parsedBid<=0 || parsedAsk<=parsedBid){
+      return false;
+   }
+   return true;
+}
+
 void OnInit()
 {  iStart = 50;
+   if(!ValidateConfig()){
+      return;
+   }
    ArrayResize(Array_Sprids,MaxArraySprids);
-      ArrayFill(Array_Sprids,0,MaxArraySprids,-1 );
+      ArrayFill(Array_Sprids,0,MaxArraySprids,0 );
    ArrayResize(Array_Gaps,MaxArrayGaps);
-      ArrayFill(Array_Gaps,0,MaxArrayGaps,-1 );
+      ArrayFill(Array_Gaps,0,MaxArrayGaps,0 );
    
    ServerPort   = Resiver_Port;
    magic_number = Resiver_Port ;
@@ -330,17 +377,23 @@ ulong time = GetTickCount();
 
 void runOrder(string msg__ , ClientSocket * pClient){   
 
-        New_Ask                 =  getAsk( msg__ );
-        New_Bid                 =  getBid( msg__ );
+        string feedId = "";
+        if(!TryParseFeedMessage(msg__,New_Ask,New_Bid,feedId)){
+           Print("Invalid feed message skipped: ",msg__);
+           return;
+        }
         New_Spread              = toPoints( New_Ask-New_Bid )   ;
+        if(New_Spread<=0 || spread<=0){
+           return;
+        }
         int       NewGap        = toPoints(New_Ask - ask)*GapMultipe ;
         
         
         RunSpreads(spread);
         
         string stats = RunStats(NewGap);
-        RunSell(getID(msg__));
-        RunBuy(getID(msg__));     
+        RunSell(feedId);
+        RunBuy(feedId);     
         
         string msg = separ+"\n";
                msg += "------------------------------------------        Port : "+IntegerToString(ServerPort);
@@ -349,7 +402,7 @@ void runOrder(string msg__ , ClientSocket * pClient){
                msg+= Heder+"\n\n" ;
                
                setPo(1,ID,20);setPo(1,Ask_(ask),50);setPo(1,Ask_(bid),80);setPo(1,IntegerToString(spread),110);
-               setPo(2,getID(msg__),20);setPo(2,Ask_(New_Ask),50);setPo(2,Ask_(New_Bid),80);setPo(2,IntegerToString(New_Spread),110);
+               setPo(2,feedId,20);setPo(2,Ask_(New_Ask),50);setPo(2,Ask_(New_Bid),80);setPo(2,IntegerToString(New_Spread),110);
                           
                msg+= Line1+"\n\n";
                msg+= Line2+"\n\n";
@@ -391,19 +444,38 @@ void SendOrderMT5(string Type_){
          
          int magic__=magic_number*1000+order_ticket;                  // ORDER_MAGIC
          double price__ = 0;   
+         double minLot = MarketInfo(Symbol(),MODE_MINLOT);
+         double maxLot = MarketInfo(Symbol(),MODE_MAXLOT);
+         double lotStep = MarketInfo(Symbol(),MODE_LOTSTEP);
+         double requestedLots = Lots;
+         if(lotStep>0){
+            requestedLots = MathFloor(requestedLots/lotStep)*lotStep;
+         }
+         requestedLots = MathMax(minLot,MathMin(maxLot,requestedLots));
+         requestedLots = NormalizeDouble(requestedLots,2);
       //--- form the order type
          if(Type_=="BUY"){
-              price__ = bid;
-              Trade_SL = bid - fromPoints(SL);
-              Trade_TP = bid + fromPoints(TP);
+              RefreshRates();
+              price__ = Ask;
+              Trade_SL = Ask - fromPoints(SL);
+              Trade_TP = Ask + fromPoints(TP);
               OrderTypeOpend = "BUY";
-              int ticket = OrderSend(Symbol(),OP_BUY,Lots ,bid,Slippage,Trade_SL,Trade_TP,Trade_ID,magic__);
+              int ticket = OrderSend(Symbol(),OP_BUY,requestedLots ,Ask,Slippage,NormalizeDouble(Trade_SL,Digits),NormalizeDouble(Trade_TP,Digits),Trade_ID,magic__);
+              if(ticket<0){
+                 Print("OrderSend BUY failed, err=",GetLastError());
+                 OrderIsOpend = 0;
+              }
          }else{
-             price__ = ask;
-             Trade_SL = ask + fromPoints(SL);
-             Trade_TP = ask - fromPoints(TP);
+             RefreshRates();
+             price__ = Bid;
+             Trade_SL = Bid + fromPoints(SL);
+             Trade_TP = Bid - fromPoints(TP);
              OrderTypeOpend = "SELL";
-             int ticket = OrderSend(Symbol(),OP_SELL,Lots ,ask,Slippage,Trade_SL,Trade_TP,Trade_ID,magic__);
+             int ticket = OrderSend(Symbol(),OP_SELL,requestedLots ,Bid,Slippage,NormalizeDouble(Trade_SL,Digits),NormalizeDouble(Trade_TP,Digits),Trade_ID,magic__);
+             if(ticket<0){
+                Print("OrderSend SELL failed, err=",GetLastError());
+                OrderIsOpend = 0;
+             }
          }
       
       
@@ -502,25 +574,11 @@ string getID(string msg){
       return   StringSubstr(msg, 3 , StringFind(msg,"#*2")-3 ) ;
 }
 int toPoints(double spred){
-    double point = spred;
-    if(Digits_Symbol==0){point = point*1;}
-    if(Digits_Symbol==1){point = point*10;}
-    if(Digits_Symbol==2){point = point*100;}
-    if(Digits_Symbol==3){point = point*1000;}
-    if(Digits_Symbol==4){point = point*10000;}
-    if(Digits_Symbol==5){point = point*100000;}
-    return int(point) ;
+    return (int)MathRound(spred*MathPow(10.0,CalcDigits));
 }
 
 double fromPoints(int p){
-    double point = p;
-    if(Digits_Symbol==0){point = point/1;}
-    if(Digits_Symbol==1){point = point/10;}
-    if(Digits_Symbol==2){point = point/100;}
-    if(Digits_Symbol==3){point = point/1000;}
-    if(Digits_Symbol==4){point = point/10000;}
-    if(Digits_Symbol==5){point = point/100000;}
-    return point ;
+    return p/MathPow(10.0,CalcDigits);
 }
 double getAsk(string msg){
       int i1 = StringFind(msg,"#*2")  +3  ;
@@ -538,7 +596,7 @@ double getBid(string msg){
 void setPo(int ID_Of_Line,string var,int position){
 
       if(ID_Of_Line==1){
-         //aa = StringSubstr(aa, 0 , StringFind(aa,".")+1+Digits_Symbol )    ;
+         //aa = StringSubstr(aa, 0 , StringFind(aa,".")+1+CalcDigits )    ;
          Line1 = StringSubstr(Line1,0,position) + var + Line ;
          //Line1 = StringSetChar(Line1,i,StringGetChar(var,j) );
          //Line1 = StringSetCharacter(Line1,i,StringGetCharacter(var,j));
@@ -566,7 +624,7 @@ void setPo(int ID_Of_Line,string var,int position){
 double Price_Double( string ask_ ){
    string aa  = ask_ ;
    
-   aa = StringSubstr(aa, 0 , StringFind(aa,".")+1+Digits_Symbol )    ;
+   aa = StringSubstr(aa, 0 , StringFind(aa,".")+1+CalcDigits )    ;
    
    return StoD( aa ) ;
 
@@ -578,7 +636,7 @@ double StoD(string a){return StringToDouble(a); }
 string Ask_( double ask_ ){
    string aa =DoubleToString(ask_);
    
-   aa = StringSubstr(aa, 0 , StringFind(aa,".")+1+Digits_Symbol )    ;
+   aa = StringSubstr(aa, 0 , StringFind(aa,".")+1+CalcDigits )    ;
    
    return aa;
 
