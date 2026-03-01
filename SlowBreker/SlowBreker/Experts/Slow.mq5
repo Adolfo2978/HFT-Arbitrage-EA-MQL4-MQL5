@@ -60,12 +60,59 @@ int     Gap,MeanGap   = 0 ;
 string SellBuy        = "SellBuy";
 
 int count1,count2,count3,count4,count5=0;
+int CalcDigits = 3;
+
+bool ValidateConfig()
+{
+   if(Resiver_Port==0){
+      Print("Invalid Resiver_Port");
+      return false;
+   }
+   if(Lots<=0){
+      Print("Invalid Lots, must be > 0");
+      return false;
+   }
+   if(TP<=0 || SL<=0){
+      Print("Invalid TP/SL, must be > 0");
+      return false;
+   }
+   if(Digits_Symbol<0 || Digits_Symbol>8){
+      Print("Invalid Digits_Symbol, using symbol digits");
+      CalcDigits = (int)SymbolInfoInteger(Symbol(),SYMBOL_DIGITS);
+   } else {
+      CalcDigits = Digits_Symbol;
+   }
+   return true;
+}
+
+bool TryParseFeedMessage(string msg,double &parsedAsk,double &parsedBid,string &feedId)
+{
+   int p2 = StringFind(msg,"#*2");
+   int p3 = StringFind(msg,"#*3");
+   int p4 = StringFind(msg,"#*4");
+   if(p2<=2 || p3<=p2 || p4<=p3){
+      return false;
+   }
+
+   feedId = StringSubstr(msg,3,p2-3);
+   parsedAsk = Price_Double(StringSubstr(msg,p2+3,p3-(p2+3)));
+   parsedBid = Price_Double(StringSubstr(msg,p3+3,p4-(p3+3)));
+
+   if(parsedAsk<=0 || parsedBid<=0 || parsedAsk<=parsedBid){
+      return false;
+   }
+   return true;
+}
+
 void OnInit()
 {  
+   if(!ValidateConfig()){
+      return;
+   }
    ArrayResize(Array_Sprids,MaxArraySprids);
-      ArrayFill(Array_Sprids,0,MaxArraySprids,-1 );
+      ArrayFill(Array_Sprids,0,MaxArraySprids,0 );
    ArrayResize(Array_Gaps,MaxArrayGaps);
-      ArrayFill(Array_Gaps,0,MaxArrayGaps,-1 );
+      ArrayFill(Array_Gaps,0,MaxArrayGaps,0 );
    
    ServerPort   = Resiver_Port;
    magic_number = Resiver_Port ;
@@ -349,17 +396,23 @@ ulong time = GetTickCount();
 
 void runOrder(string msg__ , ClientSocket * pClient){   
 
-        New_Ask                 =  getAsk( msg__ );
-        New_Bid                 =  getBid( msg__ );
+        string feedId = "";
+        if(!TryParseFeedMessage(msg__,New_Ask,New_Bid,feedId)){
+           Print("Invalid feed message skipped: ",msg__);
+           return;
+        }
         New_Spread              = toPoints( New_Ask-New_Bid )   ;
+        if(New_Spread<=0 || spread<=0){
+           return;
+        }
         int       NewGap        = toPoints(New_Ask - ask)*GapMultipe ;
         
         
         RunSpreads(spread);
         
         string stats = RunStats(NewGap);
-        RunSell(getID(msg__));
-        RunBuy(getID(msg__));     
+        RunSell(feedId);
+        RunBuy(feedId);     
         
         string msg = separ+"\n";
                msg += "------------------------------------------        Port : "+IntegerToString(ServerPort);
@@ -367,7 +420,7 @@ void runOrder(string msg__ , ClientSocket * pClient){
                msg+= Heder+"\n\n" ;
                
                setPo(1,ID,20);setPo(1,Ask_(ask),50);setPo(1,Ask_(bid),80);setPo(1,IntegerToString(spread),110);
-               setPo(2,getID(msg__),20);setPo(2,Ask_(New_Ask),50);setPo(2,Ask_(New_Bid),80);setPo(2,IntegerToString(New_Spread),110);
+               setPo(2,feedId,20);setPo(2,Ask_(New_Ask),50);setPo(2,Ask_(New_Bid),80);setPo(2,IntegerToString(New_Spread),110);
                           
                msg+= Line1+"\n\n";
                msg+= Line2+"\n\n";
@@ -409,34 +462,47 @@ void SendOrderMT5(string Type_){
          request.comment = Trade_ID   ;       // setting a pending order
          request.magic=magic_number*1000+order_ticket;                  // ORDER_MAGIC
          request.symbol=_Symbol;                      // symbol
-         request.volume=Lots;                          // volume in 0.1 lots
+         double lotStep = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+         double minLot = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+         double maxLot = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
+         double requestedLots = Lots;
+         if(lotStep>0){
+            requestedLots = MathFloor(requestedLots/lotStep)*lotStep;
+         }
+         requestedLots = MathMax(minLot,MathMin(maxLot,requestedLots));
+         request.volume=NormalizeDouble(requestedLots,2);
                             // Take Profit is not specified  
          double price__ = 0;   
       //--- form the order type
          if(Type_=="BUY"){
               request.type=ORDER_TYPE_BUY;         // order type()
-              request.price= bid ;
-              price__ = bid;
-              Trade_SL = bid - fromPoints(SL);
-              Trade_TP = bid + fromPoints(TP);
+              request.price= ask ;
+              price__ = ask;
+              Trade_SL = ask - fromPoints(SL);
+              Trade_TP = ask + fromPoints(TP);
               OrderTypeOpend = "BUY";
          }else{
              request.type=ORDER_TYPE_SELL;         // order type()
-             request.price= ask ;
-             price__ = ask;
-             Trade_SL = ask + fromPoints(SL);
-             Trade_TP = ask - fromPoints(TP);
+             request.price= bid ;
+             price__ = bid;
+             Trade_SL = bid + fromPoints(SL);
+             Trade_TP = bid - fromPoints(TP);
              OrderTypeOpend = "SELL";
          }
-         request.sl=Trade_SL;                                // Stop Loss is not specified
-         request.tp=Trade_TP;
+         request.sl=NormalizeDouble(Trade_SL,dig);
+         request.tp=NormalizeDouble(Trade_TP,dig);
+         request.deviation=(ulong)Slippage;
       //--- send a trade request
          MqlTradeResult result={};
-         int h = OrderSend(request,result);
+         bool ok = OrderSend(request,result);
       //--- write the server reply to log  
          
          
-         Print(__FUNCTION__,":",result.comment,"_",OrderTypeOpend,":",price__,"TP:",Trade_TP,"SL:",Trade_SL);
+         Print(__FUNCTION__,":",result.comment,"_",OrderTypeOpend,":",price__,"TP:",Trade_TP,"SL:",Trade_SL," ret:",result.retcode);
+         if(!ok || result.retcode!=TRADE_RETCODE_DONE){
+            Print("OrderSend failed, code=",result.retcode);
+            OrderIsOpend = 0;
+         }
          
          if(result.retcode==10016){
             //Print(result.bid,"__",result.ask,"__",result.price);
@@ -532,25 +598,11 @@ string getID(string msg){
       return   StringSubstr(msg, 3 , StringFind(msg,"#*2")-3 ) ;
 }
 int toPoints(double spred){
-    double point = spred;
-    if(Digits_Symbol==0){point = point*1;}
-    if(Digits_Symbol==1){point = point*10;}
-    if(Digits_Symbol==2){point = point*100;}
-    if(Digits_Symbol==3){point = point*1000;}
-    if(Digits_Symbol==4){point = point*10000;}
-    if(Digits_Symbol==5){point = point*100000;}
-    return int(point) ;
+    return (int)MathRound(spred*MathPow(10.0,CalcDigits));
 }
 
 double fromPoints(int p){
-    double point = p;
-    if(Digits_Symbol==0){point = point/1;}
-    if(Digits_Symbol==1){point = point/10;}
-    if(Digits_Symbol==2){point = point/100;}
-    if(Digits_Symbol==3){point = point/1000;}
-    if(Digits_Symbol==4){point = point/10000;}
-    if(Digits_Symbol==5){point = point/100000;}
-    return point ;
+    return p/MathPow(10.0,CalcDigits);
 }
 double getAsk(string msg){
       int i1 = StringFind(msg,"#*2")  +3  ;
@@ -568,7 +620,7 @@ double getBid(string msg){
 void setPo(int ID_Of_Line,string var,int position){
 
       if(ID_Of_Line==1){
-         //aa = StringSubstr(aa, 0 , StringFind(aa,".")+1+Digits_Symbol )    ;
+         //aa = StringSubstr(aa, 0 , StringFind(aa,".")+1+CalcDigits )    ;
          Line1 = StringSubstr(Line1,0,position) + var + Line ;
          //Line1 = StringSetChar(Line1,i,StringGetChar(var,j) );
          //Line1 = StringSetCharacter(Line1,i,StringGetCharacter(var,j));
@@ -596,7 +648,7 @@ void setPo(int ID_Of_Line,string var,int position){
 double Price_Double( string ask_ ){
    string aa  = ask_ ;
    
-   aa = StringSubstr(aa, 0 , StringFind(aa,".")+1+Digits_Symbol )    ;
+   aa = StringSubstr(aa, 0 , StringFind(aa,".")+1+CalcDigits )    ;
    
    return StoD( aa ) ;
 
@@ -608,7 +660,7 @@ double StoD(string a){return StringToDouble(a); }
 string Ask_( double ask_ ){
    string aa =DoubleToString(ask_);
    
-   aa = StringSubstr(aa, 0 , StringFind(aa,".")+1+Digits_Symbol )    ;
+   aa = StringSubstr(aa, 0 , StringFind(aa,".")+1+CalcDigits )    ;
    
    return aa;
 
